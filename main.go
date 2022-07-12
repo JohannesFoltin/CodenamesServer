@@ -33,6 +33,8 @@ type Game struct {
 	Code        string
 	Picks       int
 	CurrentTeam bool
+	WinCase     string
+	WinReason   string
 	Cards       []Card
 	Users       []User
 }
@@ -44,9 +46,10 @@ type Message struct {
 }
 
 var (
-    game Game
-    isBlueGC bool = false
-    isRedGC bool = false
+	game         Game
+	isBlueGC     bool = false
+	isRedGC      bool = false
+	startingTeam bool = false
 )
 
 // & Referenz mitgeben (Pointer erstellen)
@@ -60,12 +63,11 @@ func main() {
 }
 
 func gameInit() {
-	startingPick := false
-    rand.Seed(time.Now().UnixNano())
+	rand.Seed(time.Now().UnixNano())
 	if rand.Intn(2) == 0 {
-		startingPick = true
+		startingTeam = true
 	}
-	game = Game{"", 0, startingPick, nil, make([]User, 0)}
+	game = Game{"", 0, startingTeam, "", "", nil, make([]User, 0)}
 	cards := make([]Card, 0)
 	rand.Shuffle(len(words), func(i int, j int) {
 		words[i], words[j] = words[j], words[i]
@@ -73,14 +75,14 @@ func gameInit() {
 	for i := 0; i < 25; i++ {
 		switch {
 		case i < 9:
-			if startingPick {
+			if startingTeam {
 				cards = append(cards, Card{words[i], "Blue", true})
 			} else {
 				cards = append(cards, Card{words[i], "Red", true})
 			}
 
 		case 8 < i && i < 17:
-			if !startingPick {
+			if !startingTeam {
 				cards = append(cards, Card{words[i], "Blue", true})
 			} else {
 				cards = append(cards, Card{words[i], "Red", true})
@@ -93,9 +95,11 @@ func gameInit() {
 			cards = append(cards, Card{words[i], "Black", true})
 		}
 	}
+	rand.Shuffle(len(cards), func(i int, j int) {
+		cards[i], cards[j] = cards[j], cards[i]
+	})
 	game.Cards = cards
 }
-
 
 func wsEndpoint(w http.ResponseWriter, r *http.Request) {
 
@@ -139,22 +143,22 @@ func reader(u *User) {
 
 		if !init {
 			//Verification JSON: {"name": "Johannes","typ": "AgentB"}
-            err := json.Unmarshal(p, u)
-            if err != nil {
-                fmt.Println(err)
-            }
-            switch{
-            case (isBlueGC && u.Typ == "GCB") || (isRedGC && u.Typ == "GCR"):
-                u.ws.WriteMessage(websocket.CloseMessage, websocket.FormatCloseMessage(1003, "This Type of Player is already taken. Please choose another one!"))
-                game.Users = remove(game.Users,*u)
-            case u.Typ == "GCB":
-                isBlueGC = true
-            case u.Typ == "GCR":
-                isRedGC = true 
-            }
+			err := json.Unmarshal(p, u)
+			if err != nil {
+				fmt.Println(err)
+			}
+			switch {
+			case (isBlueGC && u.Typ == "GCB") || (isRedGC && u.Typ == "GCR"):
+				u.ws.WriteMessage(websocket.CloseMessage, websocket.FormatCloseMessage(1003, "This Type of Player is already taken. Please choose another one!"))
+				game.Users = remove(game.Users, *u)
+			case u.Typ == "GCB":
+				isBlueGC = true
+			case u.Typ == "GCR":
+				isRedGC = true
+			}
 			init = true
 			fmt.Println(u.Name)
-            broadcastGameState()
+			broadcastGameState()
 
 		} else {
 			tmpMssg := Message{"", "", 0}
@@ -166,12 +170,13 @@ func reader(u *User) {
 			case tmpMssg.Goal == "GET":
 				broadcastGameState()
 			case tmpMssg.Goal == "Select":
-                if u.Typ == "GCR" || u.Typ == "GCB" {
-                    break
-                }
+				if u.Typ == "GCR" || u.Typ == "GCB" {
+					break
+				}
 				if isAllowed(*u) {
 					cardSelection(*u, tmpMssg.ParamOne)
 					checkSelection()
+					gameWinCheck()
 					broadcastGameState()
 				}
 			case tmpMssg.Goal == "Announce":
@@ -186,6 +191,36 @@ func reader(u *User) {
 	}
 }
 
+func gameWinCheck() {
+	if (startingTeam && countCards("Blue") == 9) || !startingTeam && countCards("Blue") == 8 {
+		game.WinCase = "Blue"
+		game.WinReason = "Cards"
+	}
+	if (!startingTeam && countCards("Red") == 9) || startingTeam && countCards("Red") == 8 {
+		game.WinCase = "Blue"
+		game.WinReason = "Cards"
+	}
+	if countCards("Black") == 1 {
+		if game.CurrentTeam {
+			game.WinCase = "Red"
+			game.WinReason = "BlackCard"
+		}else{
+			game.WinCase = "Blau"
+			game.WinReason = "BlackCard"
+		}
+
+	}
+}
+
+func countCards(s string) int{
+	z := 0
+	for _,vel := range game.Cards{
+		if vel.Owner == s{
+			z++
+		}
+	}
+	return z
+}
 func isAllowed(u User) bool {
 	tmpBool := false
 	if u.Typ == "AgentB" && game.CurrentTeam {
@@ -235,19 +270,22 @@ func checkSelection() {
 	fmt.Println(s[0])
 	if set.Size() == 1 && !set.Contains("") {
 		if set.Contains("Pass") {
-			deselectAllUsers()
 			game.CurrentTeam = !game.CurrentTeam
 			game.Code = ""
 			game.Picks = 0
 		} else {
 			for ind, vr := range game.Cards {
 				if s[0] == vr.Word {
-					fmt.Println("nice " + vr.Word)
 					game.Cards[ind].Coverd = false
+					if game.Cards[ind].Owner == "Grey"{
+						game.CurrentTeam = !game.CurrentTeam
+						game.Code = ""
+						game.Picks = 0
+					}
 				}
 			}
-			deselectAllUsers()
 		}
+		deselectAllUsers()
 	}
 
 }
@@ -259,12 +297,12 @@ func deselectAllUsers() {
 }
 
 func remove(s []User, u User) []User {
-    i := -1
-    for j,vel := range s{
-        if vel == u{
-            i = j
-        }
-    }
+	i := -1
+	for j, vel := range s {
+		if vel == u {
+			i = j
+		}
+	}
 	s[i] = s[len(s)-1]
 	return s[:len(s)-1]
 }
@@ -285,6 +323,5 @@ func broadcastGameState() {
 		game.Users[i].ws.WriteMessage(1, []byte(tmp))
 	}
 }
-
 
 var words = []string{"Melone", "Laster", "Peitsche", "Berliner", "Wal", "Leiter", "Hubschrauber", "Dame", "Horn", "Platte", "Forscher", "Hering", "Nacht", "Stift", "Apfel", "Mangel", "Barren", "Kiwi", "Soldat", "Bach", "Mikroskop", "Erde", "Kohle", "Mund", "Loge", "Kreuz", "Chor", "Wald", "Meer", "Flügel", "Staat", "Futter", "Pistole", "Abgabe", "Flöte", "Kunde", "England", "Pension", "Umzug", "Lehrer", "Bett", "Viertel", "Wand", "Rute", "Tempo", "Elfenbein", "Seite", "Aufzug", "Prinzessin", "Bar", "Welle", "Film", "Kamm", "Stern", "Blatt", "Haupt", "Europa", "Schneemann", "Watt", "Loch", "Lösung", "Shakespeare", "Schloss", "Birne", "Fisch", "Bauer", "Mutter", "Netz", "Gang", "Gift", "Strom", "Absatz", "Satz", "Löwe", "Bulle", "Turm", "Blinker", "Ketchup", "Mine", "Engel", "Wasser", "Niete", "Kanal", "Maler", "Indien", "Mittel", "Bär", "Dietrich", "Rasen", "Hollywood", "Pilot", "Schelle", "Mini", "Fleck", "Note", "Maschine", "Erika", "Burg", "Mandel", "Pol", "Drucker", "Karotte", "Tisch", "Star", "Schnabeltier", "Brand", "Gericht", "Schnur", "Rost", "New York", "Schiff", "Stempel", "Scheibe", "Hund", "Nuss", "Fackel", "Gut", "Knopf", "Eis", "Börse", "Teleskop", "Römer", "Busch", "Ring", "Akt", "Grad", "Honig", "Frankreich", "Pass", "Verband", "Boxer", "Linie", "Wanze", "Zahn", "Feige", "Auto", "Australien", "Mühle", "Auflauf", "Dichtung", "Takt", "Gold", "Kreis", "Harz", "Raute", "Zoll", "Linse", "Limousine", "Dinosaurier", "Optik", "Demo", "Stuhl", "Kirche", "Bremse", "Zelle", "Brötchen", "Brücke", "Pfeife", "Daumen", "Leuchte", "Rücken", "Ball", "Mast", "König", "Käfer", "Glas", "Flur", "Hand", "Spiel", "Washington", "Steuer", "Ninja", "Krebs", "Rom", "Messe", "Zentaur", "Decke", "Herz", "Essen", "Hupe", "Funken", "Maus", "Orange", "Atlantis", "Ritter", "Chemie", "Ton", "Superheld", "Kraft", "Luxemburg", "Pyramide", "Vorsatz", "Gabel", "Fliege", "Pinguin", "Siegel", "Koks", "Roboter", "Krieg", "Alpen", "Fall", "Strand", "Stock", "Koch", "Hut", "Fläche", "Jet", "Inka", "Tokio", "Toast", "Messer", "Bock", "art", "Spinne", "Adler", "Antarktis", "Känguruh", "Pflaster", "Bein", "Krone", "Loch Ness", "Konzert", "Tafel", "Spion", "Strauß", "Wind", "Weide", "Moskau", "Griechenland", "Rock", "Finger", "Flasche", "Bahn", "Krankheit", "Fest", "Tor", "Kiefer", "Schirm", "Fallschirm", "Stamm", "Geschirr", "Papier", "Schein", "Fuß", "Kapitän", "China", "Uhr", "Golf", "Nagel", "Bayern", "Schalter", "Pferd", "Kiel", "Feuer", "Riemen", "Punkt", "Kippe", "Geist", "Quelle", "Bau", "Reif", "Korb", "Schule", "Katze", "Gürtel", "Hahn", "Riegel", "Tag", "Hotel", "Jura", "Glocke", "Horst", "Drossel", "Anwalt", "Wolkenkratzer", "Verein", "Königin", "Bogen", "Skelett", "Mal", "Torte", "Dieb", "Roulette", "Osten", "Ägypten", "Zylinder", "Karte", "Figur", "London", "Muschel", "Luft", "Kater", "Doktor", "Strudel", "Hase", "Matte", "Bombe", "Winnetou", "Boot", "Laser", "Pirat", "Straße", "Botschaft", "Moos", "Deutschland", "Löffel", "Millionär", "Becken", "Peking", "Schokolade", "Schlange", "Schnee", "Einhorn", "Läufer", "Bank", "Kerze", "Amerikaner", "Schuppen", "Fessel", "Jahr", "Korn", "Tod", "Mond", "Landung", "Oper", "Tau", "Stadion", "Arm", "Wurm", "Knie", "Lakritze", "Fuchs", "Zug", "Taste", "Satellit", "Lippe", "Sekretär", "Tanz", "Genie", "Quartett", "Lager", "Gesicht", "Drache", "Afrika", "Rolle", "Öl", "Leben", "Ente", "Würfel", "Morgenstern", "Batterie", "Oktopus", "Jäger", "Zeit", "Kapelle", "Zitrone", "Leim", "Schale", "Blüte", "Geschoss", "Feder", "Saturn", "Po", "Theater", "Hexe", "Bund", "Schotten", "Glück", "Atlas", "Polizei", "Hamburger", "Alien", "Grund", "Auge", "Olymp", "Schild", "Schuh", "Schimmel", "Blau", "Ausdruck", "Gras", "Wirtschaft", "Taucher", "Iris", "Bergsteiger", "Elf", "Riese", "Mark", "Brause", "Himalaja", "Gehalt", "Zwerg", "Bande", "Krankenhaus", "Wurf", "Bindung", "Heide", "Nadel", "Kasino", "Mexiko"}
