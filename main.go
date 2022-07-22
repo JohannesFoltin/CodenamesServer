@@ -6,12 +6,13 @@ import (
 	"log"
 	"math/rand"
 	"net/http"
+	"sync"
 	"time"
 
 	"github.com/emirpasic/gods/sets/hashset"
 	"github.com/gorilla/websocket"
 )
-
+//pass ersetztn 
 //Typen: GCB,GCR,AgentB,AgentR
 type User struct {
 	ws       *websocket.Conn `json:"-"`
@@ -35,8 +36,9 @@ type Game struct {
 	CurrentTeam bool
 	WinCase     string
 	WinReason   string
-	Cards       []Card
-	Users       []User
+	Cards       []Card 
+	Users       []*User
+	mutex sync.Mutex `json:"-"`
 }
 
 type Message struct {
@@ -54,6 +56,8 @@ var (
 
 // & Referenz mitgeben (Pointer erstellen)
 // * wieder nur ein Element drauß machen
+// Methode erwartet *Irgendwas, dann erwartet er eine Referenz
+// *irgendwas wird init oder in einer strucktur, dann arbeitet er mit einer Referenz
 
 func main() {
 	fmt.Println("Hello World")
@@ -67,7 +71,7 @@ func gameInit() {
 	if rand.Intn(2) == 0 {
 		startingTeam = true
 	}
-	game = Game{"", 0, startingTeam, "", "", nil, make([]User, 0)}
+	game = Game{"", 0, startingTeam, "", "", nil, make([]*User, 0),sync.Mutex{}}
 	cards := make([]Card, 0)
 	rand.Shuffle(len(words), func(i int, j int) {
 		words[i], words[j] = words[j], words[i]
@@ -121,11 +125,14 @@ func wsEndpoint(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		log.Println(err)
 	}
-
-	newUser := User{ws, "Unknown", "AgentRed", ""}
+	game.mutex.Lock()
+	newUser := &User{ws, "Unknown", "", ""}
 	game.Users = append(game.Users, newUser)
-
-	reader(&game.Users[len(game.Users)-1])
+	for _,ver := range game.Users{
+		fmt.Println(ver)
+	}
+	game.mutex.Unlock()
+	reader(newUser)
 }
 func reader(u *User) {
 	init := false
@@ -136,12 +143,15 @@ func reader(u *User) {
 			log.Println(err)
 			return
 		}
-
+	
+		
 		// print out that message for clarity
 		tmpS := string(p)
 		fmt.Println(tmpS)
-
+		game.mutex.Lock()
 		if !init {
+			print("Init")
+			//lock
 			//Verification JSON: {"name": "Johannes","typ": "AgentB"}
 			err := json.Unmarshal(p, u)
 			if err != nil {
@@ -150,7 +160,7 @@ func reader(u *User) {
 			switch {
 			case (isBlueGC && u.Typ == "GCB") || (isRedGC && u.Typ == "GCR"):
 				u.ws.WriteMessage(websocket.CloseMessage, websocket.FormatCloseMessage(1003, "This Type of Player is already taken. Please choose another one!"))
-				game.Users = remove(game.Users, *u)
+				game.Users = remove(game.Users, u)
 			case u.Typ == "GCB":
 				isBlueGC = true
 			case u.Typ == "GCR":
@@ -159,8 +169,9 @@ func reader(u *User) {
 			init = true
 			fmt.Println(u.Name)
 			broadcastGameState()
-
+			//unlock
 		} else {
+			//lock differ
 			tmpMssg := Message{"", "", 0}
 			err := json.Unmarshal(p, &tmpMssg)
 			if err != nil {
@@ -173,21 +184,30 @@ func reader(u *User) {
 				if u.Typ == "GCR" || u.Typ == "GCB" {
 					break
 				}
-				if isAllowed(*u) {
-					cardSelection(*u, tmpMssg.ParamOne)
+				if isAllowed(u) {
+					cardSelection(u, tmpMssg.ParamOne)
 					checkSelection()
 					gameWinCheck()
 					broadcastGameState()
 				}
 			case tmpMssg.Goal == "Announce":
-				if isAllowed(*u) {
+				if isAllowed(u) {
 					game.Code = tmpMssg.ParamOne
 					game.Picks = tmpMssg.ParamTwo
 				}
 			}
-
+			//unlock
 		}
+		game.mutex.Unlock()
 
+		if _, _, err := u.ws.NextReader(); err != nil {
+			game.mutex.Lock()
+            u.ws.Close()
+			game.Users= remove(game.Users,u)
+			game.mutex.Unlock()
+			broadcastGameState()
+            break
+        }
 	}
 }
 
@@ -197,7 +217,7 @@ func gameWinCheck() {
 		game.WinReason = "Cards"
 	}
 	if (!startingTeam && countCards("Red") == 9) || startingTeam && countCards("Red") == 8 {
-		game.WinCase = "Blue"
+		game.WinCase = "Red"
 		game.WinReason = "Cards"
 	}
 	if countCards("Black") == 1 {
@@ -205,7 +225,7 @@ func gameWinCheck() {
 			game.WinCase = "Red"
 			game.WinReason = "BlackCard"
 		}else{
-			game.WinCase = "Blau"
+			game.WinCase = "Blue"
 			game.WinReason = "BlackCard"
 		}
 
@@ -216,12 +236,15 @@ func countCards(s string) int{
 	z := 0
 	for _,vel := range game.Cards{
 		if vel.Owner == s{
-			z++
+			if vel.Coverd == false {
+				z++
+			
+			}
 		}
 	}
 	return z
 }
-func isAllowed(u User) bool {
+func isAllowed(u *User) bool {
 	tmpBool := false
 	if u.Typ == "AgentB" && game.CurrentTeam {
 		tmpBool = true
@@ -238,7 +261,7 @@ func isAllowed(u User) bool {
 	return tmpBool
 }
 
-func cardSelection(u User, c string) {
+func cardSelection(u *User, c string) {
 	for i := 0; i < len(game.Users); i++ {
 		if u == game.Users[i] {
 			game.Users[i].Selected = c
@@ -277,7 +300,7 @@ func checkSelection() {
 			for ind, vr := range game.Cards {
 				if s[0] == vr.Word {
 					game.Cards[ind].Coverd = false
-					if game.Cards[ind].Owner == "Grey"{
+					if (game.Cards[ind].Owner == "Grey") || (game.Cards[ind].Owner == "Red" && game.CurrentTeam)|| (game.Cards[ind].Owner == "Blue" && !game.CurrentTeam){
 						game.CurrentTeam = !game.CurrentTeam
 						game.Code = ""
 						game.Picks = 0
@@ -296,7 +319,7 @@ func deselectAllUsers() {
 	}
 }
 
-func remove(s []User, u User) []User {
+func remove(s []*User, u *User) []*User {
 	i := -1
 	for j, vel := range s {
 		if vel == u {
@@ -319,6 +342,7 @@ func broadcastGameState() {
 	if err != nil {
 		fmt.Println(err)
 	}
+	fmt.Println(string(tmp))
 	for i := range game.Users {
 		game.Users[i].ws.WriteMessage(1, []byte(tmp))
 	}
