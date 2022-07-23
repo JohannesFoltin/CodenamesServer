@@ -170,7 +170,7 @@ func reader(u *User) {
 			fmt.Println(u.Name)
 			broadcastGameState()
 			//unlock
-		} else {
+		} else if game.WinCase == "" {
 			//lock differ
 			tmpMssg := Message{"", "", 0}
 			err := json.Unmarshal(p, &tmpMssg)
@@ -197,6 +197,8 @@ func reader(u *User) {
 				}
 			}
 			//unlock
+		} else{
+			broadcastGameState()
 		}
 		game.mutex.Unlock()
 
@@ -236,7 +238,7 @@ func countCards(s string) int{
 	z := 0
 	for _,vel := range game.Cards{
 		if vel.Owner == s{
-			if vel.Coverd == false {
+			if !vel.Coverd {
 				z++
 			
 			}
